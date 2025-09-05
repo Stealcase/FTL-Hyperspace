@@ -46,7 +46,7 @@ target_include_directories(
 
     ${Boost_INCLUDE_DIRS}
     ${LUA_INCLUDE_DIR}
-
+    accesskit/include
     # Note: Don't vcpkg-fy rapidxml. It's already more than a decade old and we've customized the code to avoid its bug
     #       that leads to a compilation failure. See https://sourceforge.net/p/rapidxml/bugs/16/ for more info.
     rapidxml
@@ -60,12 +60,14 @@ target_include_directories(
 )
 target_link_libraries(
     Hyperspace PRIVATE
+    accesskit/lib
     ${LUA_LIBRARIES}
     Threads::Threads
 )
 
 target_sources(
     Hyperspace PRIVATE
+    A11y.cpp
     AbilityDrone.cpp
     AbilityDrone.h
     AdditionalWeaponSlots.cpp
