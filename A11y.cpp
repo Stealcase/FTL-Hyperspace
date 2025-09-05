@@ -1,12 +1,10 @@
 #include "Global.h" // TODO: put this is a11y.hpp
 #include <array>
 #include <cstdint>
-#include <memory>
 #include <stdio.h>
 #include <stdlib.h>
 
 #include "FTLGame.h"
-// #include "FTLGameELF64.h"
 #include "accesskit/include/accesskit.h"
 
 #if (defined(__linux__) || defined(__DragonFly__) || defined(__FreeBSD__) ||   \
@@ -37,6 +35,14 @@ const accesskit_rect BUTTON_2_RECT = {20.0, 60.0, 100.0, 100.0};
 const int32_t SET_FOCUS_MSG = 0;
 const int32_t DO_DEFAULT_ACTION_MSG = 1;
 
+struct action_handler_state {
+  uint32_t event_type; // THis can be a keypress or something else I think
+  uint32_t window_id;  // THis is the button or associated interactable element
+                       // you want to perform something on
+};
+
+struct action_handler_state action_handler = {
+    1, 0}; // Window ID is only relevant for SDL, not Accesskit
 class window_state {
 public:
   accesskit_node_id focus;
@@ -56,6 +62,7 @@ public:
 private:
 };
 
+window_state state;
 accesskit_node *build_button(accesskit_node_id id, const char *label,
                              accesskit_rect rect) {
   accesskit_node *node = accesskit_node_new(ACCESSKIT_ROLE_BUTTON);
@@ -77,7 +84,44 @@ accesskit_node *build_announcement(const char *text) {
 class Accesskit_FTL_Adapter {
 
 public:
-  static Accesskit_FTL_Adapter *GetInstance() { return instance; }
+  static accesskit_node *root;
+  static accesskit_tree *tree;
+
+  static void do_action(accesskit_action_request *request, void *userdata) {
+    struct action_handler_state *state = (action_handler_state *)
+        userdata; // TODO: No idea why this works, think about this
+    // event.type = state->event_type;
+    // event.user.windowID = state->window_id;
+    // event.user.data1 = (void *)((uintptr_t)(request->target));
+    if (request->action == ACCESSKIT_ACTION_FOCUS) {
+      // event.user.code = SET_FOCUS_MSG;
+      // Set the Button to bHover and MAYBE bSelected?
+      // SDL_PushEvent(event); // In SDL, this is where we push the event to the
+      // system
+    } else if (request->action == ACCESSKIT_ACTION_CLICK) {
+      // event.user.code = DO_DEFAULT_ACTION_MSG;
+      // Click button
+      //  SDL_PushEvent(&event); ///
+    }
+    accesskit_action_request_free(request);
+  }
+  static accesskit_tree_update *build_initial_tree(void *userdata) {
+    root = Accesskit_FTL_Adapter::window_state_build_root();
+    tree = accesskit_tree_new(WINDOW_ROOT_ID);
+    accesskit_tree_update *result =
+        accesskit_tree_update_with_capacity_and_focus(1, 1); // TODO: Fix this
+    return result;
+  }
+  static Accesskit_FTL_Adapter *GetInstance() {
+    if (instance == nullptr) {
+
+      Accesskit_FTL_Adapter *adapter = new Accesskit_FTL_Adapter(
+          build_initial_tree, &state, do_action, &action_handler,
+          Accesskit_FTL_Adapter::deactivate_accessibility, &state);
+    }
+
+    return instance;
+  }
 #if defined(__APPLE__)
   accesskit_macos_subclassing_adapter *adapter;
 #elif defined(UNIX)
@@ -194,6 +238,10 @@ public:
   }
 
 private:
+  static void deactivate_accessibility(void *userdata) {
+    /* There's nothing in the state that depends on whether the adapter
+       is active, so there's nothing to do here. */
+  }
   static Accesskit_FTL_Adapter *instance;
 };
 
@@ -233,36 +281,6 @@ void accesskit_a11y_adapter_update_root_window_bounds(
 #endif
 }
 
-struct action_handler_state {
-  uint32_t event_type; // THis can be a keypress or something else I think
-  uint32_t window_id;  // THis is the button or associated interactable element
-                       // you want to perform something on
-};
-
-void do_action(accesskit_action_request *request, void *userdata) {
-  struct action_handler_state *state = (action_handler_state *)
-      userdata; // TODO: No idea why this works, think about this
-  // event.type = state->event_type;
-  // event.user.windowID = state->window_id;
-  // event.user.data1 = (void *)((uintptr_t)(request->target));
-  if (request->action == ACCESSKIT_ACTION_FOCUS) {
-    // event.user.code = SET_FOCUS_MSG;
-    // Set the Button to bHover and MAYBE bSelected?
-    // SDL_PushEvent(event); // In SDL, this is where we push the event to the
-    // system
-  } else if (request->action == ACCESSKIT_ACTION_CLICK) {
-    // event.user.code = DO_DEFAULT_ACTION_MSG;
-    // Click button
-    //  SDL_PushEvent(&event); ///
-  }
-  accesskit_action_request_free(request);
-}
-
-void deactivate_accessibility(void *userdata) {
-  /* There's nothing in the state that depends on whether the adapter
-     is active, so there's nothing to do here. */
-}
-
 // TODO: Figure out which hook deals with game focus
 void GameGainedFocus(Accesskit_FTL_Adapter adapter) {
   accesskit_a11y_adapter_update_window_focus_state(&adapter, true);
@@ -292,11 +310,8 @@ void SelectKeyPressed(window_state state, Accesskit_FTL_Adapter adapter) {
   // window_state_press_button(&state, &adapter, id);
 }
 bool startup_accesskit() {
-  window_state state;
   // Uint32 window_id = SDL_GetWindowID(window); // WHy is windowId important
   // here?
-  struct action_handler_state action_handler = {
-      1, 0}; // Window ID is only relevant for SDL, not Accesskit
   // TODO: Feed in a windovFrame here
   // accesskit_FTL_adapter_init(&adapter, window, build_initial_tree,
   // &state,
@@ -309,11 +324,9 @@ HOOK_METHOD(LanguageChooser, OnRender, ()->void) {
            "(A11y.cpp)\n")
 
   WindowFrame *window;
-  // Node and tree is constructed separately
-  // root is the root node. tree is the structure that contains nodes.
-  // Tree might just be a list of IDs, while node can have children
-  accesskit_node *root = Accesskit_FTL_Adapter::window_state_build_root();
-  accesskit_tree *tree = accesskit_tree_new(WINDOW_ROOT_ID);
+  auto ftl_adapter = Accesskit_FTL_Adapter::GetInstance();
+  auto root = ftl_adapter->root;
+  auto tree = ftl_adapter->tree;
   const std::size_t numLanguages = Global_OptionsScreen_languageList->size();
   accesskit_tree_update *result = accesskit_tree_update_with_capacity_and_focus(
       numLanguages + 1, 1); // Hacky way to focus first element of list. Also,
@@ -352,10 +365,6 @@ HOOK_METHOD(LanguageChooser, OnRender, ()->void) {
     accesskit_nodeids[i] = node_id;
   }
   accesskit_node_set_children(root, numLanguages, accesskit_nodeids);
-
-  // Accesskit_FTL_Adapter *adapter = new Accesskit_FTL_Adapter(
-  //     build_initial_tree, &state, do_action, &action_handler,
-  //     deactivate_accessibility, &state);
 }
 
 #define a11y (Accesskit_FTL_Adapter::GetInstance())
