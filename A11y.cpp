@@ -1,7 +1,12 @@
+#include "Global.h" // TODO: put this is a11y.hpp
+#include <array>
 #include <cstdint>
+#include <memory>
 #include <stdio.h>
 #include <stdlib.h>
 
+#include "FTLGame.h"
+// #include "FTLGameELF64.h"
 #include "accesskit/include/accesskit.h"
 
 #if (defined(__linux__) || defined(__DragonFly__) || defined(__FreeBSD__) ||   \
@@ -11,7 +16,7 @@
 
 const char WINDOW_TITLE[] = "Hello world";
 
-const accesskit_node_id WINDOW_ID = 0;
+const accesskit_node_id WINDOW_ROOT_ID = 0;
 const accesskit_node_id ENGLISH_NODE_ID = 1;
 const accesskit_node_id DEUTSCH_NODE_ID = 2;
 const accesskit_node_id FRENCH_NODE_ID = 3;
@@ -23,7 +28,7 @@ const accesskit_node_id JAPANESE_NODE_ID = 8;
 const accesskit_node_id CHINESE_HANZI_NODE_ID = 9;
 const accesskit_node_id KOREAN_NODE_ID = 10;
 const accesskit_node_id ANNOUNCEMENT_ID = 3;
-#define INITIAL_FOCUS BUTTON_1_ID
+#define INITIAL_FOCUS ENGLISH_NODE_ID
 
 const accesskit_rect BUTTON_1_RECT = {20.0, 20.0, 100.0, 60.0};
 
@@ -32,14 +37,27 @@ const accesskit_rect BUTTON_2_RECT = {20.0, 60.0, 100.0, 100.0};
 const int32_t SET_FOCUS_MSG = 0;
 const int32_t DO_DEFAULT_ACTION_MSG = 1;
 
-accesskit_node *build_button(accesskit_node_id id, const char *label) {
-  accesskit_rect rect;
-  if (id == ENGLISH) {
-    rect = BUTTON_1_RECT;
-  } else {
-    rect = BUTTON_2_RECT;
+class window_state {
+public:
+  accesskit_node_id focus;
+  const char *announcement;
+  window_state() : focus(ENGLISH_NODE_ID) {};
+  window_state(class window_state *state) {
+    state->focus = ENGLISH_NODE_ID;
+    state->announcement = NULL;
+    // state->mutex = a11y_CreateMutex();
   }
+  window_state(window_state &&) = default;
+  window_state(const window_state &) = default;
+  window_state &operator=(window_state &&) = default;
+  window_state &operator=(const window_state &) = default;
+  ~window_state();
 
+private:
+};
+
+accesskit_node *build_button(accesskit_node_id id, const char *label,
+                             accesskit_rect rect) {
   accesskit_node *node = accesskit_node_new(ACCESSKIT_ROLE_BUTTON);
   accesskit_node_set_bounds(node, rect);
   accesskit_node_set_label(node, label);
@@ -55,7 +73,11 @@ accesskit_node *build_announcement(const char *text) {
   return node;
 }
 
-struct accesskit_a11y_adapter {
+// Wrapper around platform adapters
+class Accesskit_FTL_Adapter {
+
+public:
+  static Accesskit_FTL_Adapter *GetInstance() { return instance; }
 #if defined(__APPLE__)
   accesskit_macos_subclassing_adapter *adapter;
 #elif defined(UNIX)
@@ -63,77 +85,121 @@ struct accesskit_a11y_adapter {
 #elif defined(_WIN32)
   accesskit_windows_subclassing_adapter *adapter;
 #endif
+  Accesskit_FTL_Adapter(
+      accesskit_activation_handler_callback activation_handler,
+      void *activation_handler_userdata,
+      accesskit_action_handler_callback action_handler,
+      void *action_handler_userdata,
+      accesskit_deactivation_handler_callback deactivation_handler,
+      void *deactivation_handler_userdata) {
+#if defined(__APPLE__)
+    // TODO: add support for MAC without needing wmInfo
+    accesskit_macos_add_focus_forwarder_to_window_class("FTLWindow");
+    // SDL_SysWMinfo wmInfo;
+    // SDL_VERSION(&wmInfo.version);
+    // SDL_GetWindowWMInfo(window, &wmInfo);
+    // adapter->adapter = accesskit_macos_subclassing_adapter_for_window(
+    //     (void *)wmInfo.info.cocoa.window, activation_handler,
+    //     activation_handler_userdata, action_handler,
+    //     action_handler_userdata);
+#elif defined(UNIX)
+    adapter = accesskit_unix_adapter_new(
+        activation_handler, activation_handler_userdata, action_handler,
+        action_handler_userdata, deactivation_handler,
+        deactivation_handler_userdata);
+#elif defined(_WIN32)
+    // SDL_SysWMinfo wmInfo;
+    // SDL_VERSION(&wmInfo.version);
+    // SDL_GetWindowWMInfo(window, &wmInfo);
+    // TODO: Add support for windows without needing WmInfo
+    adapter->adapter = accesskit_windows_subclassing_adapter_new(
+        wmInfo.info.win.window, activation_handler, activation_handler_userdata,
+        action_handler, action_handler_userdata);
+#endif
+  };
+  // Build tree again after button press
+  static accesskit_tree_update *
+  build_tree_update_for_button_press(void *userdata) {
+    window_state *state = (window_state *)
+        userdata; // TODO: Fix this cast, this is probably not correct to cast
+                  // random pointer to windowstate pointer
+    accesskit_node *announcement = build_announcement(state->announcement);
+    accesskit_tree_update *update =
+        accesskit_tree_update_with_capacity_and_focus(2, state->focus);
+    return update;
+  }
+  Accesskit_FTL_Adapter(Accesskit_FTL_Adapter &&) = default;
+  Accesskit_FTL_Adapter(const Accesskit_FTL_Adapter &) = default;
+  Accesskit_FTL_Adapter &operator=(Accesskit_FTL_Adapter &&) = default;
+  Accesskit_FTL_Adapter &operator=(const Accesskit_FTL_Adapter &) = default;
+  ~Accesskit_FTL_Adapter() {
+    if (adapter != NULL) {
+#if defined(__APPLE__)
+      accesskit_macos_subclassing_adapter_free(adapter->adapter);
+#elif defined(UNIX)
+      accesskit_unix_adapter_free(adapter);
+#elif defined(_WIN32)
+      accesskit_windows_subclassing_adapter_free(adapter->adapter);
+#endif
+    }
+  }
+  static accesskit_node *window_state_build_root() {
+    accesskit_node *node = accesskit_node_new(ACCESSKIT_ROLE_WINDOW);
+    accesskit_node_set_label(node, WINDOW_TITLE);
+
+    // if (state->announcement != NULL) {
+    //   accesskit_node_push_child(node, ANNOUNCEMENT_ID);
+    // }
+    return node;
+  }
+  // Call this whenever you want build the tree based on an updated focus
+  static accesskit_tree_update *
+  build_tree_update_for_focus_update(void *userdata) {
+    struct window_state *state =
+        (window_state *)userdata; // TODO: Fix unholy cast
+    accesskit_tree_update *update =
+        accesskit_tree_update_with_focus(state->focus);
+    return update;
+  }
+  // Call this to manually set the focus to a spesific node
+  void window_state_set_focus(class window_state *state,
+                              accesskit_node_id focus) {
+    state->focus = focus;
+    accesskit_FTL_adapter_update_if_active(
+        this, build_tree_update_for_focus_update, state);
+  }
+  //
+  static void accesskit_FTL_adapter_update_if_active(
+      Accesskit_FTL_Adapter *adapter,
+      accesskit_tree_update_factory update_factory,
+      void *update_factory_userdata) {
+#if defined(__APPLE__)
+    accesskit_macos_queued_events *events =
+        accesskit_macos_subclassing_adapter_update_if_active(
+            adapter->adapter, update_factory, update_factory_userdata);
+    if (events != NULL) {
+      accesskit_macos_queued_events_raise(events);
+    }
+#elif defined(UNIX)
+    accesskit_unix_adapter_update_if_active(adapter->adapter, update_factory,
+                                            update_factory_userdata);
+#elif defined(_WIN32)
+    accesskit_windows_queued_events *events =
+        accesskit_windows_subclassing_adapter_update_if_active(
+            adapter->adapter, update_factory, update_factory_userdata);
+    if (events != NULL) {
+      accesskit_windows_queued_events_raise(events);
+    }
+#endif
+  }
+
+private:
+  static Accesskit_FTL_Adapter *instance;
 };
 
-void accesskit_a11y_adapter_init(
-    struct accesskit_a11y_adapter *adapter, SDL_Window *window,
-    accesskit_activation_handler_callback activation_handler,
-    void *activation_handler_userdata,
-    accesskit_action_handler_callback action_handler,
-    void *action_handler_userdata,
-    accesskit_deactivation_handler_callback deactivation_handler,
-    void *deactivation_handler_userdata) {
-#if defined(__APPLE__)
-  accesskit_macos_add_focus_forwarder_to_window_class("a11yWindow");
-  a11y_SysWMinfo wmInfo;
-  a11y_VERSION(&wmInfo.version);
-  a11y_GetWindowWMInfo(window, &wmInfo);
-  adapter->adapter = accesskit_macos_subclassing_adapter_for_window(
-      (void *)wmInfo.info.cocoa.window, activation_handler,
-      activation_handler_userdata, action_handler, action_handler_userdata);
-#elif defined(UNIX)
-  adapter->adapter = accesskit_unix_adapter_new(
-      activation_handler, activation_handler_userdata, action_handler,
-      action_handler_userdata, deactivation_handler,
-      deactivation_handler_userdata);
-#elif defined(_WIN32)
-  a11y_SysWMinfo wmInfo;
-  a11y_VERSION(&wmInfo.version);
-  a11y_GetWindowWMInfo(window, &wmInfo);
-  adapter->adapter = accesskit_windows_subclassing_adapter_new(
-      wmInfo.info.win.window, activation_handler, activation_handler_userdata,
-      action_handler, action_handler_userdata);
-#endif
-}
-
-void accesskit_a11y_adapter_destroy(struct accesskit_sdl_adapter *adapter) {
-  if (adapter->adapter != NULL) {
-#if defined(__APPLE__)
-    accesskit_macos_subclassing_adapter_free(adapter->adapter);
-#elif defined(UNIX)
-    accesskit_unix_adapter_free(adapter->adapter);
-#elif defined(_WIN32)
-    accesskit_windows_subclassing_adapter_free(adapter->adapter);
-#endif
-  }
-}
-
-void accesskit_a11y_adapter_update_if_active(
-    struct accesskit_a11y_adapter *adapter,
-    accesskit_tree_update_factory update_factory,
-    void *update_factory_userdata) {
-#if defined(__APPLE__)
-  accesskit_macos_queued_events *events =
-      accesskit_macos_subclassing_adapter_update_if_active(
-          adapter->adapter, update_factory, update_factory_userdata);
-  if (events != NULL) {
-    accesskit_macos_queued_events_raise(events);
-  }
-#elif defined(UNIX)
-  accesskit_unix_adapter_update_if_active(adapter->adapter, update_factory,
-                                          update_factory_userdata);
-#elif defined(_WIN32)
-  accesskit_windows_queued_events *events =
-      accesskit_windows_subclassing_adapter_update_if_active(
-          adapter->adapter, update_factory, update_factory_userdata);
-  if (events != NULL) {
-    accesskit_windows_queued_events_raise(events);
-  }
-#endif
-}
-
+// Set the window focus state
 void accesskit_a11y_adapter_update_window_focus_state(
-    struct accesskit_a11y_adapter *adapter, bool is_focused) {
+    Accesskit_FTL_Adapter *adapter, bool is_focused) {
 #if defined(__APPLE__)
   accesskit_macos_queued_events *events =
       accesskit_macos_subclassing_adapter_update_view_focus_state(
@@ -148,162 +214,48 @@ void accesskit_a11y_adapter_update_window_focus_state(
   /* On Windows, the subclassing adapter takes care of this. */
 }
 
+// When total window size is updated
 void accesskit_a11y_adapter_update_root_window_bounds(
-    struct accesskit_a11y_adapter *adapter, SDL_Window *window) {
+    struct Accesskit_FTL_Adapter *adapter, WindowFrame *window) {
 #if defined(UNIX)
   int x, y, width, height;
-  a11y_GetWindowPosition(window, &x, &y);
-  a11y_GetWindowSize(window, &width, &height);
+  // a11y_GetWindowPosition(window, &x, &y);
+  // a11y_GetWindowSize(window, &width, &height);
   int top, left, bottom, right;
-  a11y_GetWindowBordersSize(window, &top, &left, &bottom, &right);
-  accesskit_rect outer_bounds = {x - left, y - top, x + width + right,
-                                 y + height + bottom};
-  accesskit_rect inner_bounds = {x, y, x + width, y + height};
-  accesskit_unix_adapter_set_root_window_bounds(adapter->adapter, outer_bounds,
-                                                inner_bounds);
+  //  a11y_GetWindowBordersSize(window, &top, &left, &bottom, &right);
+  // TODO: Calculate rect for window + outer window of game
+  // accesskit_rect outer_bounds = {x - left, y - top, x + width + right,
+  //                                y + height + bottom};
+  // accesskit_rect inner_bounds = {x, y, x + width, y + height};
+  // accesskit_unix_adapter_set_root_window_bounds(adapter->adapter,
+  // outer_bounds,
+  //                                               inner_bounds);
 #endif
 }
 
-struct window_state {
-  accesskit_node_id focus;
-  const char *announcement;
-  a11y_mutex *mutex;
-};
-
-void window_state_init(struct window_state *state) {
-  state->focus = INITIAL_FOCUS;
-  state->announcement = NULL;
-  state->mutex = a11y_CreateMutex();
-}
-
-void window_state_destroy(struct window_state *state) {
-  a11y_DestroyMutex(state->mutex);
-}
-
-void window_state_lock(struct window_state *state) {
-  a11y_LockMutex(state->mutex);
-}
-
-void window_state_unlock(struct window_state *state) {
-  a11y_UnlockMutex(state->mutex);
-}
-
-accesskit_node *window_state_build_root(const struct window_state *state) {
-  accesskit_node *node = accesskit_node_new(ACCESSKIT_ROLE_WINDOW);
-    accesskit_node_push_child(node, ENGLISH_NODE_ID);
-    accesskit_node_push_child(node, DEUTSCH_NODE_ID);
-    accesskit_node_push_child(node, FRENCH_NODE_ID);
-    accesskit_node_push_child(node, ITALIAN_NODE_ID);
-    accesskit_node_push_child(node, POLISH_NODE_ID);
-    accesskit_node_push_child(node, BRAZILLIAN_PORTUGUESE_NODE_ID);
-    accesskit_node_push_child(node, RUSSIAN_NODE_ID);
-    accesskit_node_push_child(node, JAPANESE_NODE_ID);
-    accesskit_node_push_child(node, CHINESE_HANZI_NODE_ID);
-    accesskit_node_push_child(node, KOREAN_NODE_ID);
-
-  if (state->announcement != NULL) {
-    accesskit_node_push_child(node, ANNOUNCEMENT_ID);
-  }
-  accesskit_node_set_label(node, WINDOW_TITLE);
-  return node;
-}
-
-accesskit_tree_update *
-window_state_build_initial_tree(const struct window_state *state) {
-  accesskit_node *root = window_state_build_root(state);
-  accesskit_node *button_1 = build_button(ENGLISH_NODE_ID, "English");
-  accesskit_node *button_2 = build_button(DEUTSCH_NODE_ID, "Deutsch");
-
-  accesskit_node *button_3 = build_button(FRENCH_NODE_ID,"French" ;
-  accesskit_node *button_4 = build_button(ITALIAN_NODE_ID,"Italian" ;
-  accesskit_node *button_5 = build_button(POLISH_NODE_ID,"Polish" ;
-  accesskit_node *button_6 = build_button(BRAZILLIAN_PORTUGUESE_NODE_ID,"Brazillian_portuguese" ;
-  accesskit_node *button_7 = build_button(RUSSIAN_NODE_ID,"Russian" ;
-  accesskit_node *button_8 = build_button(JAPANESE_NODE_ID,"Japanese" ;
-  accesskit_node *button_9 = build_button(CHINESE_HANZI_NODE_ID,"Chinese_hanzi" ;
-  accesskit_node *button_10 = build_button(KOREAN_NODE_ID,"korean" ;
-  accesskit_tree_update *result = accesskit_tree_update_with_capacity_and_focus(
-      (state->announcement != NULL) ? 4 : 3, state->focus);
-  accesskit_tree *tree = accesskit_tree_new(WINDOW_ID);
-  accesskit_tree_update_set_tree(result, tree);
-  accesskit_tree_update_push_node(result, WINDOW_ID, root);
-  accesskit_tree_update_push_node(result, ENGLISH_NODE_ID, button_1);
-  accesskit_tree_update_push_node(result, DEUTSCH_NODE_ID, button_2);
-  if (state->announcement != NULL) {
-    accesskit_node *announcement = build_announcement(state->announcement);
-    accesskit_tree_update_push_node(result, ANNOUNCEMENT_ID, announcement);
-  }
-  return result;
-}
-
-accesskit_tree_update *build_tree_update_for_button_press(void *userdata) {
-  struct window_state *state = userdata;
-  accesskit_node *announcement = build_announcement(state->announcement);
-  accesskit_node *root = window_state_build_root(state);
-  accesskit_tree_update *update =
-      accesskit_tree_update_with_capacity_and_focus(2, state->focus);
-  accesskit_tree_update_push_node(update, ANNOUNCEMENT_ID, announcement);
-  accesskit_tree_update_push_node(update, WINDOW_ID, root);
-  return update;
-}
-
-void window_state_press_button(struct window_state *state,
-                               struct accesskit_a11y_adapter *adapter,
-                               accesskit_node_id id) {
-  const char *text;
-  if (id == ENGLISH) {
-    text = "You pressed button 1";
-  } else {
-    text = "You pressed button 2";
-  }
-  state->announcement = text;
-  accesskit_a11y_adapter_update_if_active(
-      adapter, build_tree_update_for_button_press, state);
-}
-
-accesskit_tree_update *build_tree_update_for_focus_update(void *userdata) {
-  struct window_state *state = userdata;
-  accesskit_tree_update *update =
-      accesskit_tree_update_with_focus(state->focus);
-  return update;
-}
-
-void window_state_set_focus(struct window_state *state,
-                            struct accesskit_a11y_adapter *adapter,
-                            accesskit_node_id focus) {
-  state->focus = focus;
-  accesskit_a11y_adapter_update_if_active(
-      adapter, build_tree_update_for_focus_update, state);
-}
-
 struct action_handler_state {
-  Uint32 event_type;
-  Uint32 window_id;
+  uint32_t event_type; // THis can be a keypress or something else I think
+  uint32_t window_id;  // THis is the button or associated interactable element
+                       // you want to perform something on
 };
 
 void do_action(accesskit_action_request *request, void *userdata) {
-  struct action_handler_state *state = userdata;
-  a11y_Event event;
-  a11y_zero(event);
-  event.type = state->event_type;
-  event.user.windowID = state->window_id;
-  event.user.data1 = (void *)((uintptr_t)(request->target));
+  struct action_handler_state *state = (action_handler_state *)
+      userdata; // TODO: No idea why this works, think about this
+  // event.type = state->event_type;
+  // event.user.windowID = state->window_id;
+  // event.user.data1 = (void *)((uintptr_t)(request->target));
   if (request->action == ACCESSKIT_ACTION_FOCUS) {
-    event.user.code = SET_FOCUS_MSG;
-    a11y_PushEvent(&event);
+    // event.user.code = SET_FOCUS_MSG;
+    // Set the Button to bHover and MAYBE bSelected?
+    // SDL_PushEvent(event); // In SDL, this is where we push the event to the
+    // system
   } else if (request->action == ACCESSKIT_ACTION_CLICK) {
-    event.user.code = DO_DEFAULT_ACTION_MSG;
-    a11y_PushEvent(&event);
+    // event.user.code = DO_DEFAULT_ACTION_MSG;
+    // Click button
+    //  SDL_PushEvent(&event); ///
   }
   accesskit_action_request_free(request);
-}
-
-accesskit_tree_update *build_initial_tree(void *userdata) {
-  struct window_state *state = userdata;
-  window_state_lock(state);
-  accesskit_tree_update *update = window_state_build_initial_tree(state);
-  window_state_unlock(state);
-  return update;
 }
 
 void deactivate_accessibility(void *userdata) {
@@ -311,99 +263,99 @@ void deactivate_accessibility(void *userdata) {
      is active, so there's nothing to do here. */
 }
 
-int main(int argc, char *argv[]) {
-  printf("This example has no visible GUI, and a keyboard interface:\n");
-  printf("- [Tab] switches focus between two logical buttons.\n");
-  printf("- [Space] 'presses' the button, adding static text in a live region "
-         "announcing that it was pressed.\n");
-#if defined(_WIN32)
-  printf("Enable Narrator with [Win]+[Ctrl]+[Enter] (or [Win]+[Enter] on older "
-         "versions of Windows).\n");
-#elif defined(UNIX)
-  printf("Enable Orca with [Super]+[Alt]+[S].\n");
-#endif
-  if (a11y_Init(SDL_INIT_VIDEO) != 0) {
-    fprintf(stderr, "a11y initialization failed: (%s)\n", SDL_GetError());
-    return -1;
-  }
-  Uint32 user_event = a11y_RegisterEvents(1);
-  if (user_event == (Uint32)-1) {
-    fprintf(stderr, "Couldn't register user event: (%s)\n", a11y_GetError());
-    return -1;
-  }
-
-  struct window_state state;
-  window_state_init(&state);
-  a11y_Window *window =
-      a11y_CreateWindow(WINDOW_TITLE, SDL_WINDOWPOS_UNDEFINED,
-                        a11y_WINDOWPOS_UNDEFINED, 800, 600, SDL_WINDOW_SHOWN);
-  a11y_Surface *screenSurface = SDL_GetWindowSurface(window);
-  a11y_FillRect(screenSurface, NULL,
-                a11y_MapRGB(&(*screenSurface->format), 0x00, 0x00, 0x00));
-  a11y_UpdateWindowSurface(window);
-  Uint32 window_id = a11y_GetWindowID(window);
-  struct action_handler_state action_handler = {user_event, window_id};
-  struct accesskit_a11y_adapter adapter;
-  accesskit_a11y_adapter_init(&adapter, window, build_initial_tree, &state,
-                              do_action, &action_handler,
-                              deactivate_accessibility, &state);
-  a11y_ShowWindow(window);
-
-  a11y_Event event;
-  while (a11y_WaitEvent(&event)) {
-    if (event.type == a11y_QUIT) {
-      break;
-    } else if (event.type == a11y_WINDOWEVENT &&
-               event.window.windowID == window_id) {
-      switch (event.window.event) {
-      case a11y_WINDOWEVENT_FOCUS_GAINED:
-        accesskit_a11y_adapter_update_window_focus_state(&adapter, true);
-        break;
-      case a11y_WINDOWEVENT_FOCUS_LOST:
-        accesskit_a11y_adapter_update_window_focus_state(&adapter, false);
-        break;
-      case a11y_WINDOWEVENT_MAXIMIZED:
-      case a11y_WINDOWEVENT_MOVED:
-      case a11y_WINDOWEVENT_RESIZED:
-      case a11y_WINDOWEVENT_RESTORED:
-      case a11y_WINDOWEVENT_SIZE_CHANGED:
-      case a11y_WINDOWEVENT_SHOWN:
-        accesskit_a11y_adapter_update_root_window_bounds(&adapter, window);
-        break;
-      }
-    } else if (event.type == a11y_KEYDOWN && event.key.windowID == window_id) {
-      switch (event.key.keysym.sym) {
-      case a11yK_TAB:
-        window_state_lock(&state);
-        accesskit_node_id new_focus =
-            (state.focus == ENGLISH) ? DEUTSCH : ENGLISH;
-        window_state_set_focus(&state, &adapter, new_focus);
-        window_state_unlock(&state);
-        break;
-      case a11yK_SPACE:
-        window_state_lock(&state);
-        accesskit_node_id id = state.focus;
-        window_state_press_button(&state, &adapter, id);
-        window_state_unlock(&state);
-        break;
-      }
-    } else if (event.type == user_event && event.user.windowID == window_id) {
-      accesskit_node_id target =
-          (accesskit_node_id)((uintptr_t)(event.user.data1));
-      if (target == ENGLISH || target == DEUTSCH) {
-        window_state_lock(&state);
-        if (event.user.code == SET_FOCUS_MSG) {
-          window_state_set_focus(&state, &adapter, target);
-        } else if (event.user.code == DO_DEFAULT_ACTION_MSG) {
-          window_state_press_button(&state, &adapter, target);
-        }
-        window_state_unlock(&state);
-      }
-    }
-  }
-
-  accesskit_a11y_adapter_destroy(&adapter);
-  window_state_destroy(&state);
-  a11y_Quit();
-  return 0;
+// TODO: Figure out which hook deals with game focus
+void GameGainedFocus(Accesskit_FTL_Adapter adapter) {
+  accesskit_a11y_adapter_update_window_focus_state(&adapter, true);
 }
+// TODO: Figure out which hook deals with game focus
+void GameLostFocus(Accesskit_FTL_Adapter adapter) {
+  accesskit_a11y_adapter_update_window_focus_state(&adapter, false);
+}
+void GameWindowSizeChanged(Accesskit_FTL_Adapter adapter) {
+  // case SDL_WINDOWEVENT_MAXIMIZED:
+  // case SDL_WINDOWEVENT_MOVED:
+  // case SDL_WINDOWEVENT_RESIZED:
+  // case SDL_WINDOWEVENT_RESTORED:
+  // case SDL_WINDOWEVENT_SIZE_CHANGED:
+  // case SDL_WINDOWEVENT_SHOWN:
+  // accesskit_a11y_adapter_update_root_window_bounds(&adapter, window);
+}
+// TODO: Figure out how to channel keypresses through here
+
+void NavKeyPressed() {
+  // TODO: Simply increment the focus?
+  // accesskit_node_id new_focus = (state.focus == ENGLISH) ? DEUTSCH : ENGLISH;
+  // window_state_set_focus(&state, &adapter, new_focus);
+}
+void SelectKeyPressed(window_state state, Accesskit_FTL_Adapter adapter) {
+  u_int64_t id = 0; // Make this the current element
+  // window_state_press_button(&state, &adapter, id);
+}
+bool startup_accesskit() {
+  window_state state;
+  // Uint32 window_id = SDL_GetWindowID(window); // WHy is windowId important
+  // here?
+  struct action_handler_state action_handler = {
+      1, 0}; // Window ID is only relevant for SDL, not Accesskit
+  // TODO: Feed in a windovFrame here
+  // accesskit_FTL_adapter_init(&adapter, window, build_initial_tree,
+  // &state,
+  //                            do_action, &action_handler,
+  //                            deactivate_accessibility, &state);
+}
+
+HOOK_METHOD(LanguageChooser, OnRender, ()->void) {
+  LOG_HOOK("HOOK_METHOD -> LanguageChooser::OnRender -> Begin "
+           "(A11y.cpp)\n")
+
+  WindowFrame *window;
+  // Node and tree is constructed separately
+  // root is the root node. tree is the structure that contains nodes.
+  // Tree might just be a list of IDs, while node can have children
+  accesskit_node *root = Accesskit_FTL_Adapter::window_state_build_root();
+  accesskit_tree *tree = accesskit_tree_new(WINDOW_ROOT_ID);
+  const std::size_t numLanguages = Global_OptionsScreen_languageList->size();
+  accesskit_tree_update *result = accesskit_tree_update_with_capacity_and_focus(
+      numLanguages + 1, 1); // Hacky way to focus first element of list. Also,
+                            // we are counting all nodes in tree, including root
+  accesskit_tree_update_set_tree(result, tree);
+  accesskit_tree_update_push_node(result, WINDOW_ROOT_ID, root);
+  std::array<accesskit_node_id, numLanguages> accesskit_nodeids;
+  auto oldLanguage = G_->GetTextLibrary()->currentLanguage;
+  double x_cord = 496.0;
+  double y_cord = 360.0 - static_cast<double>(numLanguages) * 37 /
+                              2; // TODO: double division might be bad here
+  // std::string background;
+  double drawHeight;
+  for (std::size_t i = 0; i < numLanguages; ++i) {
+    accesskit_rect cur_rect;
+    if (i == 0) {
+      drawHeight = 46;
+      cur_rect = {x_cord, y_cord, x_cord + 80, y_cord + drawHeight};
+      // background = "optionsUI/language_top.png";
+    } else if (i < numLanguages - 1) {
+      // background = "optionsUI/language_mid.png";
+      drawHeight = 37;
+      cur_rect = {x_cord, y_cord, x_cord + 80, y_cord + drawHeight};
+    }
+    y_cord += drawHeight;
+    // G_->GetResources()->RenderImageString(background, drawPoint.x,
+    // drawPoint.y, 0, COLOR_WHITE, 1.f, false);
+    // G_->GetTextLibrary()->SetLanguage((*Global_OptionsScreen_languageList)[i]);
+    // this->buttons[i]->OnRender();
+    accesskit_node_id node_id = i + 1;
+    std::string label = this->buttons[i]->label->data;
+    const char *c_label = label.c_str();
+    accesskit_node *node = build_button(node_id, c_label, cur_rect);
+    accesskit_node_push_child(node, node_id);
+    accesskit_tree_update_push_node(result, node_id, node);
+    accesskit_nodeids[i] = node_id;
+  }
+  accesskit_node_set_children(root, numLanguages, accesskit_nodeids);
+
+  // Accesskit_FTL_Adapter *adapter = new Accesskit_FTL_Adapter(
+  //     build_initial_tree, &state, do_action, &action_handler,
+  //     deactivate_accessibility, &state);
+}
+
+#define a11y (Accesskit_FTL_Adapter::GetInstance())
