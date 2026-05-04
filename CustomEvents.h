@@ -62,6 +62,8 @@ extern std::unordered_map<int, std::string> renamedBeacons;
 extern std::unordered_map<int, std::pair<std::string, int>> regeneratedBeacons;
 extern std::vector<bool> savedPriorityEventReq;
 
+extern bool deathEventActive;
+
 extern std::unordered_map<std::string, int> playerVariables;
 
 struct JumpEvent
@@ -971,7 +973,7 @@ public:
     void LoadEvent(WorldManager *world, EventLoadList *eventList, int seed, CustomEvent *parentEvent = nullptr);
     void LoadEvent(WorldManager *world, std::string eventName, bool ignoreUnique, int seed, CustomEvent *parentEvent = nullptr);
     static void QueueEvent(EventQueueEvent &event);
-    static void QueueEvent(std::string &event, int seed);
+    static void QueueEvent(const std::string &event, int seed);
 
     static bool LocationRemoveNebula(Location *loc);
 
